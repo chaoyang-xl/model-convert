@@ -1,0 +1,36 @@
+chair
+sofa
+table
+desk
+bed
+wardrobe
+cabinet
+shelf
+bookshelf
+nightstand
+stool
+television
+monitor
+computer
+laptop
+refrigerator
+microwave
+oven
+stove
+range hood
+washing machine
+dishwasher
+sink
+toilet
+bathtub
+shower
+mirror
+lamp
+air conditioner
+fan
+plant
+trash can
+door
+window
+curtain
+rug

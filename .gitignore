@@ -1,0 +1,42 @@
+# ── 模型权重：体积大，按 README「原始模型下载」补齐或重新导出 ──
+models/
+weights/
+*.pt
+*.pth
+*.onnx
+*.rknn
+*.engine
+*.tflite
+*.mlmodel
+*.safetensors
+*.bin
+
+# 根目录残留的 ONNX 优化中间文件
+check*.onnx
+
+# ── 校准数据：图片与清单都不入库（清单含本机绝对路径，见 README）──
+data/calibration/images/
+data/calibration/dataset.txt
+
+# ── 转换与评测产物：可再生成 ──
+results/
+artifacts/
+*.log
+*.prof
+*.npy
+*.npz
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
