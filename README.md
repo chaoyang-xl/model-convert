@@ -98,36 +98,101 @@ artifacts/          可再生成的缓存或临时产物
 
 所有本地转换和评测脚本均以本文件所在目录作为项目根目录定位资源，因此可从任意工作目录启动。
 
-## 转换顺序
+## 两条转换路线
+
+两条路线**共用第一段**：把 12 个室内类别写进模型，导出静态 ONNX。
 
 ```bash
 python3 scripts/conversion/export_worldv2.py
-python3 scripts/conversion/split_onnx_output.py
-python3 scripts/conversion/convert_rknn_fp.py
-python3 scripts/conversion/convert_rknn_int8.py
+# -> models/onnx/yolov8s-worldv2_indoor.onnx   单输出 [1, 16, 8400]（4 框参数 + 12 类）
 ```
 
-`export_worldv2.py` 将 12 个室内类别写入模型并导出静态 ONNX；`split_onnx_output.py` 把检测框和类别分数拆成两个输出，供当前 INT8 流程使用。
+导出参数固定为 `imgsz=640, batch=1, dynamic=False, simplify=False, opset=12, half=False`。
+
+### 路线 A：单输出 + FP16（不量化）
+
+适合先跑通、看效果，**不需要校准集**。
+
+```bash
+python3 scripts/conversion/convert_rknn_fp.py
+```
+
+| 文件 | 说明 |
+|---|---|
+| 输入 `models/onnx/yolov8s-worldv2_indoor.onnx` | 单输出 `output0 [1,16,8400]` |
+| 输出 `models/rknn/yolov8s-worldv2_indoor_fp.rknn` | FP16（`do_quantization=False`），单输出 |
+
+后处理：`pred[:, 0:4]` 是框、`pred[:, 4:]` 是类别分数，见 `scripts/evaluation/compare_onnx_rknn.py`。
+
+### 路线 B：拆分双输出 + INT8 量化
+
+INT8 必须先拆输出，原因见下。
+
+```bash
+python3 scripts/conversion/split_onnx_output.py   # 摘两个中间张量当输出
+python3 scripts/conversion/convert_rknn_int8.py   # 需要 data/calibration/dataset.txt
+```
+
+| 文件 | 说明 |
+|---|---|
+| 输入 `models/onnx/yolov8s-worldv2_indoor.onnx` | 单输出 |
+| 中间 `models/onnx/yolov8s-worldv2_indoor_split.onnx` | **仍是 1 个文件**，但含 **2 个输出张量**：`/model.22/Mul_2_output_0` 框 `[1,4,8400]`、`/model.22/Sigmoid_output_0` 分数 `[1,12,8400]` |
+| 输出 `models/rknn/yolov8s-worldv2_indoor_split_int8.rknn` | INT8，**单文件**，推理返回长度 2 的 list |
+
+后处理：`outputs[0]` 是框、`outputs[1]` 是分数，**分数已过 sigmoid，不要再 sigmoid**，见 `scripts/evaluation/detect_int8.py`。
+
+拆分节点写死在脚本里：
+
+```text
+BOX_TENSOR = "/model.22/Mul_2_output_0"
+CLS_TENSOR = "/model.22/Sigmoid_output_0"
+```
+
+### 为什么必须拆
+
+INT8 量化时每个张量只有一组 scale。单输出把框坐标（量级 0~640）和类别分数（0~1）拼在同一维，一组 scale 必然顾此失彼：要么框精度掉，要么 12 类分数被压成几个灰阶。拆开后两条分支各自量化，这是 INT8 能做到 71 ms 且精度可接受的前提。
+
+### 两条路线对照
+
+| | 路线 A | 路线 B |
+|---|---|---|
+| 输出张量 | 1 个（框 + 分数合并） | 2 个（框、分数分开） |
+| 量化 | 不量化（FP16） | INT8 |
+| 需要校准集 | 不需要 | 需要 `data/calibration/dataset.txt` |
+| 生成脚本 | `convert_rknn_fp.py` | `split_onnx_output.py` + `convert_rknn_int8.py` |
+| 产物 | `_indoor_fp.rknn` | `_indoor_split_int8.rknn` |
+| 对比脚本 | `compare_onnx_rknn.py` | `compare_onnx_rknn_int8.py` |
+
+> 注意：`models/rknn/yolov8s-worldv2_indoor_int8.rknn`（单输出 INT8）是旧版本遗留，当前脚本不再生成它，不要与 `_split_int8` 混用。
+
+## 一键版：36 类 home 变体（FP16 单输出）
+
+`scripts/conversion/convert_home_indoor_fp16.py` 把路线 A 的两步合成**一条命令**，类别从 `home_indoor_classes.txt` 读取（36 类，输出 `[1,40,8400]`）：
+
+```bash
+python3 scripts/conversion/convert_home_indoor_fp16.py
+```
+
+它除了等价于 `export_worldv2.py` + `convert_rknn_fp.py`，还额外做了：类别空值/重复检查、保存后重载比对 `names`、`onnx.checker`、输出形状断言 `[1,4+C,8400]`、每个 rknn 调用返回值检查、`finally: rknn.release()`。
+
+产物是 `models/rknn/yolov8s-worldv2_home_indoor_fp16.rknn`。它**只做单输出 FP16**，不涉及拆分与 INT8；12 类 indoor 那条仍需上面的两步（类别写死在 `export_worldv2.py` 里，改类要改代码）。
 
 ## 常用评测
 
-```bash
-python3 scripts/evaluation/compare_pt_onnx.py
-python3 scripts/evaluation/compare_onnx_rknn.py
-python3 scripts/evaluation/compare_onnx_rknn_int8.py
-python3 scripts/evaluation/detect_int8.py
-```
+| 脚本 | 对应路线 | 作用 |
+|---|---|---|
+| `compare_pt_onnx.py` | 单输出 | PT 与 ONNX 的框/分数对比 |
+| `compare_onnx_rknn.py` | 路线 A | ONNX 与 FP16 RKNN 对比 |
+| `compare_onnx_rknn_int8.py` | 路线 B | split ONNX 与 INT8 RKNN 对比 |
+| `detect_int8.py` | 路线 B | 单图检测并出图 |
+| `inspect_rknn.py` | — | 查看模型输入输出张量 |
 
-板端 200 帧延迟与 NPU 负载结果见：
-
-```text
-reports/RKNN_200_FRAME_BENCHMARK.md
-```
+板端 200 帧延迟与 NPU 负载结果见 `reports/RKNN_200_FRAME_BENCHMARK.md`。
 
 ## 当前固定类别
 
 `chair, sofa, table, cabinet, shelf, monitor, computer, television, plant, trash can, door, desk`
 
-仓库里另有一组 `*_home_indoor*` 变体，使用 37 类，类别表见 `scripts/conversion/home_indoor_classes.txt`；两套模型的 ONNX/RKNN 不能混用。
+仓库里另有一组 `*_home_indoor*` 变体，使用 36 类，类别表见 `scripts/conversion/home_indoor_classes.txt`；两套模型的 ONNX/RKNN 不能混用。
 
 类别数量或顺序变化后，需要从固定类别 PT/ONNX 开始重新导出，随后重新进行 INT8 校准。
